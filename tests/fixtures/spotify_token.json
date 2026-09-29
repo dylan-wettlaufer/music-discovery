@@ -1,0 +1,7 @@
+{
+  "access_token": "access-token",
+  "token_type": "Bearer",
+  "scope": "user-read-private user-read-recently-played user-top-read user-library-read playlist-modify-private",
+  "expires_in": 3600,
+  "refresh_token": "refresh-token"
+}

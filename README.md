@@ -16,7 +16,7 @@ cp .env.example .env
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Put the Fernet key in `TOKEN_ENCRYPTION_KEY`. Spotify and Last.fm credentials can wait until those clients are implemented.
+Put the Fernet key in `TOKEN_ENCRYPTION_KEY`, and set `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`. The redirect URI in `.env` must be allowlisted on the Spotify app. Last.fm can wait until that client is implemented.
 
 ```bash
 docker compose up
@@ -34,7 +34,7 @@ music-discovery generate   # weekly playlist; dry-run until publish is wired
 music-discovery runs       # job and recommendation history
 ```
 
-`auth`, `poll`, and `generate` exit until those stages are built. `runs` reads Postgres.
+`auth` opens a browser on the host and stores an encrypted refresh token. `poll` and `generate` exit until those stages are built. `runs` reads Postgres.
 
 Do not call Spotify's recommendations, related-artists, audio-features, or audio-analysis endpoints.
 
