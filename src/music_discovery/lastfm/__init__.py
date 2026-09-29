@@ -1,0 +1,1 @@
+"""Last.fm API client."""
