@@ -30,11 +30,12 @@ From the host, against the published Postgres port:
 alembic upgrade head
 music-discovery auth      # one-time Spotify OAuth
 music-discovery poll       # recently-played + saved tracks
+music-discovery played     # tracks stored from recently played
 music-discovery generate   # weekly playlist; dry-run until publish is wired
 music-discovery runs       # job and recommendation history
 ```
 
-`auth` opens a browser on the host and stores an encrypted refresh token. `poll` reads recently-played and saved tracks into Postgres. `generate` exits until that stage is built. `runs` reads Postgres.
+`auth` opens a browser on the host and stores an encrypted refresh token. `poll` reads recently-played and saved tracks into Postgres. `played` lists those stored plays, newest first. `generate` exits until that stage is built. `runs` reads Postgres.
 
 Do not call Spotify's recommendations, related-artists, audio-features, or audio-analysis endpoints.
 

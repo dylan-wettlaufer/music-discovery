@@ -1,6 +1,8 @@
-"""Typer commands: auth, poll, generate, runs."""
+"""Typer commands: auth, poll, played, generate, runs."""
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import typer
 import typer.rich_utils as rich_utils
@@ -11,11 +13,12 @@ from rich.panel import Panel
 from rich.table import Table
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
 
 from music_discovery.db import session_scope
 from music_discovery.jobs.poll_history import PollError, run_poll
 from music_discovery.jobs.weekly import run_weekly
-from music_discovery.models import JobRun, RecommendationRun
+from music_discovery.models import JobRun, PlayEvent, RecommendationRun, Track
 from music_discovery.pipeline.publish import publish_playlist
 from music_discovery.spotify.auth import AuthError, run_oauth
 
@@ -44,9 +47,9 @@ app = typer.Typer(
 )
 
 
-def _stdout() -> Console:
+def _stdout(*, highlight: bool = True) -> Console:
     # Built per call so tests that redirect stdout still receive the render.
-    return Console()
+    return Console(highlight=highlight)
 
 
 def _stderr() -> Console:
@@ -133,6 +136,105 @@ def _recommendations_table(rows: Sequence[RecommendationRun]) -> Table:
     return table
 
 
+@dataclass(frozen=True)
+class PlayedTrack:
+    primary_artist: str
+    name: str
+    played_at: datetime
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _as_local(value: datetime) -> datetime:
+    return _as_utc(value).astimezone()
+
+
+def _format_absolute(played_at: datetime) -> str:
+    local = _as_local(played_at)
+    hour = int(local.strftime("%I"))
+    clock = f"{hour}:{local.strftime('%M %p')}"
+    return f"{local.strftime('%a')}, {local.strftime('%b')} {local.day}, {local.year}  {clock}"
+
+
+def _relative_phrase(played_at: datetime, *, now: datetime) -> str | None:
+    seconds = int((now - _as_utc(played_at)).total_seconds())
+    if seconds < 0:
+        return None
+    if seconds < 60:
+        return "just now"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h ago"
+    days = hours // 24
+    if days < 7:
+        return f"{days}d ago"
+    weeks = days // 7
+    if weeks < 5:
+        return f"{weeks}w ago"
+    return None
+
+
+def _played_cell(played_at: datetime, *, now: datetime) -> str:
+    absolute = escape(_format_absolute(played_at))
+    relative = _relative_phrase(played_at, now=now)
+    if relative is None:
+        return absolute
+    return f"{absolute}   [dim]{escape(relative)}[/dim]"
+
+
+def _load_played_tracks(session: Session) -> list[PlayedTrack]:
+    statement = (
+        select(Track.primary_artist, Track.name, PlayEvent.played_at)
+        .select_from(PlayEvent)
+        .join(Track, Track.spotify_track_id == PlayEvent.spotify_track_id)
+        .order_by(PlayEvent.played_at.desc())
+    )
+    return [
+        PlayedTrack(artist, name, played_at)
+        for artist, name, played_at in session.execute(statement)
+    ]
+
+
+def _played_table(rows: Sequence[PlayedTrack], *, now: datetime) -> Table:
+    count = len(rows)
+    noun = "play" if count == 1 else "plays"
+    table = Table(
+        title="Recently played",
+        title_style="bold",
+        title_justify="left",
+        caption=f"{count} {noun}  ·  newest first",
+        caption_style="dim",
+        caption_justify="left",
+        box=box.ROUNDED,
+        border_style="cyan",
+        header_style="bold cyan",
+        expand=True,
+        padding=(0, 1),
+    )
+    table.add_column("#", justify="right", style="dim", no_wrap=True)
+    table.add_column("Artist", style="bold", ratio=2, overflow="fold")
+    table.add_column("Track", ratio=3, overflow="fold")
+    table.add_column("Played", no_wrap=True)
+    for index, row in enumerate(rows, start=1):
+        day = _as_local(row.played_at).date()
+        next_day = _as_local(rows[index].played_at).date() if index < count else day
+        table.add_row(
+            str(index),
+            escape(row.primary_artist),
+            escape(row.name),
+            _played_cell(row.played_at, now=now),
+            end_section=next_day != day,
+        )
+    return table
+
+
 def _empty(console: Console, title: str, message: str) -> None:
     console.print(
         Panel(
@@ -156,6 +258,24 @@ def auth() -> None:
 def poll() -> None:
     """Poll recently-played and refresh saved tracks."""
     _call(run_poll)
+
+
+@app.command()
+def played() -> None:
+    """Show tracks stored from recently played, newest first."""
+    try:
+        with session_scope() as session:
+            rows = _load_played_tracks(session)
+    except OperationalError as exc:
+        detail = str(exc.orig) if exc.orig is not None else str(exc)
+        _stderr().print(_panel(detail, title="Database unavailable", style="red"))
+        raise typer.Exit(code=1) from exc
+
+    console = _stdout(highlight=False)
+    if rows:
+        console.print(_played_table(rows, now=datetime.now(timezone.utc)))
+    else:
+        _empty(console, "Recently played", "No plays recorded yet.")
 
 
 @app.command()
