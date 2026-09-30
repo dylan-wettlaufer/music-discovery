@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "added_at": "2024-03-01T12:00:00Z",
+      "track": {
+        "id": "3AJwUDP919kvQ9QcozQPxg",
+        "name": "Yellow",
+        "duration_ms": 266773,
+        "popularity": 82,
+        "artists": [
+          {"id": "4gzpq5DPGxSnKTe4SA8HAU", "name": "Coldplay"}
+        ],
+        "album": {
+          "name": "Parachutes",
+          "release_date": "2000-07-10"
+        }
+      }
+    },
+    {
+      "added_at": "2020-01-02T00:00:00Z",
+      "track": null
+    }
+  ],
+  "limit": 50,
+  "offset": 0,
+  "total": 2,
+  "next": null
+}

@@ -1,0 +1,45 @@
+{
+  "items": [
+    {
+      "track": {
+        "id": "6ol4ZSifr7r3JnY7F5y6kE",
+        "name": "Karma Police",
+        "duration_ms": 261866,
+        "popularity": 78,
+        "artists": [
+          {"id": "4Z8W4fKeB5YxbusRsdQVPb", "name": "Radiohead"}
+        ],
+        "album": {
+          "name": "OK Computer",
+          "release_date": "1997-06-16"
+        }
+      },
+      "played_at": "2026-09-29T18:04:12.123Z",
+      "context": {
+        "type": "playlist",
+        "uri": "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M"
+      }
+    },
+    {
+      "track": {
+        "id": null,
+        "name": "Bedroom demo",
+        "is_local": true,
+        "artists": [{"id": null, "name": "Local Artist"}]
+      },
+      "played_at": "2026-09-29T17:40:00.000Z",
+      "context": null
+    },
+    {
+      "track": null,
+      "played_at": "2026-09-29T17:11:00.000Z",
+      "context": null
+    }
+  ],
+  "cursors": {
+    "after": "1759169052123",
+    "before": "1759165860000"
+  },
+  "limit": 50,
+  "next": null
+}
