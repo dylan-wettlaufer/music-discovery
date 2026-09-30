@@ -16,6 +16,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 API_ROOT = "https://api.spotify.com/v1"
+ME_URL = f"{API_ROOT}/me"
 RECENTLY_PLAYED_URL = f"{API_ROOT}/me/player/recently-played"
 SAVED_TRACKS_URL = f"{API_ROOT}/me/tracks"
 RECENTLY_PLAYED_LIMIT = 50
@@ -34,6 +35,53 @@ class SpotifyClientError(Exception):
 
 class SpotifyAuthError(SpotifyClientError):
     """The access token was rejected. Sign in again."""
+
+
+class _ExplicitContent(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    filter_enabled: bool = False
+    filter_locked: bool = False
+
+
+class _Followers(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    total: int = 0
+
+
+class _ExternalUrls(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    spotify: str | None = None
+
+
+class SpotifyUser(BaseModel):
+    """Current user from ``GET /me``."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    display_name: str | None = None
+    country: str | None = None
+    email: str | None = None
+    product: str | None = None
+    uri: str | None = None
+    followers: _Followers | None = None
+    external_urls: _ExternalUrls | None = None
+    explicit_content: _ExplicitContent | None = None
+
+    @property
+    def follower_count(self) -> int | None:
+        if self.followers is None:
+            return None
+        return self.followers.total
+
+    @property
+    def profile_url(self) -> str | None:
+        if self.external_urls is None or not self.external_urls.spotify:
+            return None
+        return self.external_urls.spotify
 
 
 class SpotifyArtist(BaseModel):
@@ -119,9 +167,13 @@ class SpotifyClient:
         self._refresh = refresh
         self._sleep = sleep or time.sleep
 
-    def get_me(self) -> None:
-        """GET /me. Identity and market."""
-        raise NotImplementedError("GET /me is not implemented.")
+    def get_me(self) -> SpotifyUser:
+        """GET /me. Identity, market, and the public profile."""
+        payload = self._get_json(ME_URL, params=None)
+        try:
+            return SpotifyUser.model_validate(payload)
+        except ValidationError as exc:
+            raise SpotifyClientError("Spotify returned an unexpected profile.") from exc
 
     def get_recently_played(self) -> list[PlayedItem]:
         """GET /me/player/recently-played. At most the last 50 qualifying plays."""
