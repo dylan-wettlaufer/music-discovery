@@ -2,7 +2,7 @@ import json
 import socket
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -22,6 +22,7 @@ from music_discovery.spotify.auth import (
     TOKEN_URL,
     AuthError,
     SpotifyProfile,
+    ensure_access_token,
     exchange_authorization_code,
     fetch_profile,
     refresh_access_token,
@@ -349,6 +350,52 @@ def test_database_is_checked_before_the_browser():
             receive_code=lambda _state: "unused",
         )
     assert opened == []
+
+
+def test_fresh_access_token_is_reused(user_db):
+    _engine, settings, sessions = user_db
+    with sessions() as session:
+        save_connected_user(
+            session,
+            profile=SpotifyProfile(id="spotify-user"),
+            refresh_token="refresh-token",
+            access_token="still-good",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=2),
+            encryption_key=settings.token_encryption_key,
+        )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        raise AssertionError("a fresh access token should not be refreshed")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        token = ensure_access_token(settings=settings, http_client=client, session_factory=sessions)
+
+    assert token == "still-good"
+
+
+def test_access_token_inside_a_minute_is_refreshed(user_db):
+    _engine, settings, sessions = user_db
+    refreshed = _load("spotify_refresh.json")
+    with sessions() as session:
+        save_connected_user(
+            session,
+            profile=SpotifyProfile(id="spotify-user"),
+            refresh_token="refresh-token",
+            access_token="about-to-expire",
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
+            encryption_key=settings.token_encryption_key,
+        )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == TOKEN_URL
+        assert "grant_type=refresh_token" in request.content.decode()
+        return httpx.Response(200, json=refreshed)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        token = ensure_access_token(settings=settings, http_client=client, session_factory=sessions)
+
+    assert token == "new-access"
 
 
 def test_refresh_requires_a_sign_in(user_db):

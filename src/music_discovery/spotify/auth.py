@@ -214,6 +214,37 @@ def refresh_access_token(
         raise AuthError(f"Database unavailable: {exc.orig}") from exc
 
 
+def ensure_access_token(
+    *,
+    settings: Settings | None = None,
+    http_client: httpx.Client | None = None,
+    session_factory: SessionFactory | None = None,
+    force: bool = False,
+) -> str:
+    """Return a usable access token, refreshing within a minute of expiry."""
+    settings = settings or get_settings()
+    _require_credentials(settings)
+    if not force:
+        try:
+            with _sessions(session_factory) as session:
+                user = _single_user(session)
+                if user.access_token_encrypted and not _expires_soon(user.access_token_expires_at):
+                    return _decrypt_access(user, settings)
+        except OperationalError as exc:
+            raise AuthError(f"Database unavailable: {exc.orig}") from exc
+    refresh_access_token(
+        settings=settings,
+        http_client=http_client,
+        session_factory=session_factory,
+    )
+    try:
+        with _sessions(session_factory) as session:
+            user = _single_user(session)
+            return _decrypt_access(user, settings)
+    except OperationalError as exc:
+        raise AuthError(f"Database unavailable: {exc.orig}") from exc
+
+
 def exchange_authorization_code(
     client: httpx.Client,
     *,
@@ -383,6 +414,11 @@ def _request_token(
         auth=(client_id, client_secret),
     )
     if response.status_code != 200:
+        if data.get("grant_type") == "refresh_token" and _error_code(response) == "invalid_grant":
+            raise AuthError(
+                "Spotify rejected the refresh token. "
+                "Sign in with `music-discovery auth` again."
+            )
         raise AuthError(
             f"Spotify token request failed ({response.status_code}): {_spotify_error(response)}"
         )
@@ -390,6 +426,30 @@ def _request_token(
         return TokenResponse.model_validate(response.json())
     except ValidationError as exc:
         raise AuthError("Spotify returned an unexpected token response.") from exc
+
+
+def _single_user(session: Session) -> User:
+    user = session.scalar(select(User).order_by(User.id).limit(1))
+    if user is None:
+        raise AuthError("Sign in with `music-discovery auth` before polling.")
+    return user
+
+
+def _decrypt_access(user: User, settings: Settings) -> str:
+    if not user.access_token_encrypted:
+        raise AuthError("Sign in with `music-discovery auth` before polling.")
+    try:
+        return decrypt_token(user.access_token_encrypted, settings.token_encryption_key)
+    except ValueError as exc:
+        raise AuthError("Stored access token could not be decrypted. Sign in again.") from exc
+
+
+def _expires_soon(expires_at: datetime | None) -> bool:
+    if expires_at is None:
+        return True
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at <= datetime.now(timezone.utc) + timedelta(minutes=1)
 
 
 def _store_tokens(
@@ -447,6 +507,16 @@ def _country(value: str | None) -> str | None:
     code = value.strip().upper()
     if len(code) == 2 and code.isalpha():
         return code
+    return None
+
+
+def _error_code(response: httpx.Response) -> str | None:
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if isinstance(body, dict) and isinstance(body.get("error"), str):
+        return body["error"]
     return None
 
 

@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
 from music_discovery.db import session_scope
-from music_discovery.jobs.poll_history import run_poll
+from music_discovery.jobs.poll_history import PollError, run_poll
 from music_discovery.jobs.weekly import run_weekly
 from music_discovery.models import JobRun, RecommendationRun
 from music_discovery.pipeline.publish import publish_playlist
@@ -67,7 +67,7 @@ def _panel(message: str, *, title: str, style: str) -> Panel:
 def _call(fn: Callable[[], None]) -> None:
     try:
         fn()
-    except (NotImplementedError, AuthError) as exc:
+    except (NotImplementedError, AuthError, PollError) as exc:
         _stderr().print(_panel(str(exc), title="Not ready", style="yellow"))
         raise typer.Exit(code=1) from exc
 

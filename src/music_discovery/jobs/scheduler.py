@@ -22,6 +22,8 @@ def _guard(fn: Callable[[], None]) -> Callable[[], None]:
             fn()
         except NotImplementedError as exc:
             logger.warning("%s", exc)
+        except Exception:
+            logger.exception("%s failed", fn.__name__)
 
     return wrapper
 

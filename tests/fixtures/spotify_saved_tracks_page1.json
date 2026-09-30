@@ -1,0 +1,19 @@
+{
+  "items": [
+    {
+      "added_at": "2026-01-02T00:00:00Z",
+      "track": {
+        "id": "track-karma",
+        "name": "Karma Police",
+        "duration_ms": 264067,
+        "popularity": 72,
+        "artists": [{ "id": "artist-radiohead", "name": "Radiohead" }],
+        "album": { "name": "OK Computer", "release_date": "1997-06-16" }
+      }
+    }
+  ],
+  "limit": 50,
+  "next": "https://api.spotify.com/v1/me/tracks?offset=50&limit=50",
+  "offset": 0,
+  "total": 2
+}

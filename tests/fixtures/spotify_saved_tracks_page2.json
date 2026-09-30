@@ -1,0 +1,19 @@
+{
+  "items": [
+    {
+      "added_at": "2025-11-03T12:30:00Z",
+      "track": {
+        "id": "track-weird-fishes",
+        "name": "Weird Fishes",
+        "duration_ms": 318000,
+        "popularity": 68,
+        "artists": [{ "id": "artist-radiohead", "name": "Radiohead" }],
+        "album": { "name": "In Rainbows", "release_date": "2007-10-10" }
+      }
+    }
+  ],
+  "limit": 50,
+  "next": null,
+  "offset": 50,
+  "total": 2
+}
