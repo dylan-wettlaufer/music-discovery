@@ -9,6 +9,7 @@ Stack: Python 3.12, Postgres 16, Docker Compose, Typer CLI.
 ```bash
 docker compose up
 music-discovery auth      # one-time Spotify OAuth
+music-discovery profile    # signed-in Spotify account
 music-discovery poll       # recently-played + saved tracks
 music-discovery played     # tracks stored from recently played
 music-discovery generate   # weekly playlist (dry-run until publish is wired)

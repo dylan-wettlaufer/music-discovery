@@ -62,7 +62,7 @@ Stack:
 
 - Python 3.12, `httpx` for both APIs, Pydantic for config and response models
 - Postgres 16, SQLAlchemy 2, Alembic
-- Typer CLI (`auth`, `poll`, `played`, `generate`, `runs`)
+- Typer CLI (`auth`, `profile`, `poll`, `played`, `generate`, `runs`)
 - APScheduler inside a long-running container, timezone `America/New_York`, so Sunday night does not drift between EST and EDT
 - Docker Compose for the app and Postgres
 
