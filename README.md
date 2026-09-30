@@ -22,7 +22,7 @@ Put the Fernet key in `TOKEN_ENCRYPTION_KEY`, and set `SPOTIFY_CLIENT_ID` and `S
 docker compose up
 ```
 
-That starts Postgres and the scheduler. The scheduler migrates the database and registers three jobs: recently-played every 3 hours, saved tracks daily at 06:00, and the weekly run Sunday at 23:00 `America/New_York`. Those stages are not implemented yet. When a job fires, it logs that and returns.
+That starts Postgres and the scheduler. The scheduler migrates the database and registers three jobs: recently-played every 3 hours, saved tracks daily at 06:00, and the weekly run Sunday at 23:00 `America/New_York`. Recently-played and saved tracks run. The weekly run is not implemented yet; when it fires, it logs that and returns.
 
 From the host, against the published Postgres port:
 
@@ -34,7 +34,7 @@ music-discovery generate   # weekly playlist; dry-run until publish is wired
 music-discovery runs       # job and recommendation history
 ```
 
-`auth` opens a browser on the host and stores an encrypted refresh token. `poll` and `generate` exit until those stages are built. `runs` reads Postgres.
+`auth` opens a browser on the host and stores an encrypted refresh token. `poll` reads recently-played and saved tracks and stores them. `generate` exits until that stage is built. `runs` reads Postgres.
 
 Do not call Spotify's recommendations, related-artists, audio-features, or audio-analysis endpoints.
 

@@ -42,6 +42,7 @@ SCOPES: tuple[str, ...] = (
 )
 
 _SIGN_IN_TIMEOUT_SECONDS = 180.0
+_ACCESS_TOKEN_SKEW = timedelta(minutes=1)
 _SAFE_ERROR = re.compile(r"[a-z0-9_]+")
 SessionFactory = Callable[[], AbstractContextManager[Session]]
 
@@ -214,6 +215,25 @@ def refresh_access_token(
         raise AuthError(f"Database unavailable: {exc.orig}") from exc
 
 
+def load_access_token(
+    *,
+    settings: Settings | None = None,
+    http_client: httpx.Client | None = None,
+    session_factory: SessionFactory | None = None,
+    force_refresh: bool = False,
+) -> str:
+    """Return a usable access token, refreshing when it expires within a minute."""
+    settings = settings or get_settings()
+    _require_credentials(settings)
+    if force_refresh or _token_needs_refresh(session_factory):
+        refresh_access_token(
+            settings=settings,
+            http_client=http_client,
+            session_factory=session_factory,
+        )
+    return _decrypt_access_token(settings, session_factory)
+
+
 def exchange_authorization_code(
     client: httpx.Client,
     *,
@@ -383,9 +403,12 @@ def _request_token(
         auth=(client_id, client_secret),
     )
     if response.status_code != 200:
-        raise AuthError(
-            f"Spotify token request failed ({response.status_code}): {_spotify_error(response)}"
-        )
+        detail = _spotify_error(response)
+        if data.get("grant_type") == "refresh_token" and _oauth_error(response) == "invalid_grant":
+            raise AuthError(
+                f"Spotify revoked access: {detail}. Sign in with `music-discovery auth` again."
+            )
+        raise AuthError(f"Spotify token request failed ({response.status_code}): {detail}")
     try:
         return TokenResponse.model_validate(response.json())
     except ValidationError as exc:
@@ -403,6 +426,37 @@ def _store_tokens(
     user.refresh_token_encrypted = encrypt_token(refresh_token, encryption_key)
     user.access_token_encrypted = encrypt_token(access_token, encryption_key)
     user.access_token_expires_at = expires_at
+
+
+def _token_needs_refresh(session_factory: SessionFactory | None) -> bool:
+    try:
+        with _sessions(session_factory) as session:
+            user = session.scalar(select(User).order_by(User.id).limit(1))
+            if user is None:
+                raise AuthError("Sign in with `music-discovery auth` before polling.")
+            expires_at = user.access_token_expires_at
+            has_token = bool(user.access_token_encrypted)
+    except OperationalError as exc:
+        raise AuthError(f"Database unavailable: {exc.orig}") from exc
+    if not has_token or expires_at is None:
+        return True
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at <= datetime.now(timezone.utc) + _ACCESS_TOKEN_SKEW
+
+
+def _decrypt_access_token(settings: Settings, session_factory: SessionFactory | None) -> str:
+    try:
+        with _sessions(session_factory) as session:
+            user = session.scalar(select(User).order_by(User.id).limit(1))
+            if user is None or not user.access_token_encrypted:
+                raise AuthError("Sign in with `music-discovery auth` before polling.")
+            try:
+                return decrypt_token(user.access_token_encrypted, settings.token_encryption_key)
+            except ValueError as exc:
+                raise AuthError("Stored access token could not be decrypted. Sign in again.") from exc
+    except OperationalError as exc:
+        raise AuthError(f"Database unavailable: {exc.orig}") from exc
 
 
 def _require_credentials(settings: Settings) -> None:
@@ -448,6 +502,16 @@ def _country(value: str | None) -> str | None:
     if len(code) == 2 and code.isalpha():
         return code
     return None
+
+
+def _oauth_error(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    if isinstance(body, dict) and isinstance(body.get("error"), str):
+        return body["error"]
+    return ""
 
 
 def _spotify_error(response: httpx.Response) -> str:

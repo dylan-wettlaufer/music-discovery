@@ -5,16 +5,33 @@ The recently-played cursor moves only after the rows are in the session, and
 the caller commits that session together with the cursor.
 """
 
-from collections.abc import Sequence
+import logging
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
-from sqlalchemy import Insert
+import httpx
+from sqlalchemy import Insert, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from music_discovery.models import PlayEvent, SavedTrack, Track, User
+from music_discovery.config import Settings, get_settings
+from music_discovery.db import session_scope
+from music_discovery.models import JobRun, PlayEvent, SavedTrack, Track, User
 from music_discovery.normalize import normalized_key
-from music_discovery.spotify.client import PlayedItem, RecentlyPlayed, SavedItem, SavedTracks, SpotifyTrack
+from music_discovery.spotify.auth import AuthError, SessionFactory, load_access_token
+from music_discovery.spotify.client import (
+    PlayedItem,
+    RecentlyPlayed,
+    SavedItem,
+    SavedTracks,
+    SpotifyClient,
+    SpotifyTrack,
+)
+
+logger = logging.getLogger("music_discovery.jobs.poll_history")
 
 _WINDOW_LIMIT = 50
 
@@ -86,20 +103,191 @@ def ingest_saved_tracks(session: Session, user: User, saved: SavedTracks) -> Ing
     )
 
 
-def run_recently_played() -> None:
+def run_recently_played(
+    *,
+    settings: Settings | None = None,
+    session_factory: SessionFactory | None = None,
+    http_client: httpx.Client | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> IngestStats:
     """Append plays idempotently and warn when the 50-track window overflowed."""
-    raise NotImplementedError("Recently-played poll is not implemented.")
+    return _run_job(
+        "recently_played",
+        lambda client: client.get_recently_played(),
+        ingest_recently_played,
+        settings=settings,
+        session_factory=session_factory,
+        http_client=http_client,
+        sleep=sleep,
+    )
 
 
-def run_saved_tracks() -> None:
+def run_saved_tracks(
+    *,
+    settings: Settings | None = None,
+    session_factory: SessionFactory | None = None,
+    http_client: httpx.Client | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> IngestStats:
     """Refresh the library. Saved tracks are seeds and lifetime hard excludes."""
-    raise NotImplementedError("Saved-track ingest is not implemented.")
+    return _run_job(
+        "saved_tracks",
+        lambda client: client.get_saved_tracks(),
+        ingest_saved_tracks,
+        settings=settings,
+        session_factory=session_factory,
+        http_client=http_client,
+        sleep=sleep,
+    )
 
 
-def run_poll() -> None:
-    """Manual poll: recently played, then saved tracks."""
-    run_recently_played()
-    run_saved_tracks()
+def run_poll(
+    *,
+    settings: Settings | None = None,
+    session_factory: SessionFactory | None = None,
+    http_client: httpx.Client | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> str:
+    """Poll recently played, then saved tracks. A revoked token stops there."""
+    recent = run_recently_played(
+        settings=settings,
+        session_factory=session_factory,
+        http_client=http_client,
+        sleep=sleep,
+    )
+    saved = run_saved_tracks(
+        settings=settings,
+        session_factory=session_factory,
+        http_client=http_client,
+        sleep=sleep,
+    )
+    gap = ""
+    if recent.gap_warning:
+        gap = " Gap: the 50-play window moved past the last cursor."
+    return f"Recently played: {recent.inserted} new.{gap}\nSaved tracks: {saved.inserted} new."
+
+
+def _run_job(
+    job_name: str,
+    fetch: Callable[[SpotifyClient], Any],
+    ingest: Callable[[Session, User, Any], IngestStats],
+    *,
+    settings: Settings | None,
+    session_factory: SessionFactory | None,
+    http_client: httpx.Client | None,
+    sleep: Callable[[float], None] | None,
+) -> IngestStats:
+    started = datetime.now(timezone.utc)
+    try:
+        page = _fetch(fetch, settings=settings, session_factory=session_factory, http_client=http_client, sleep=sleep)
+        with _sessions(session_factory) as session:
+            stats = ingest(session, _require_user(session), page)
+    except Exception as exc:
+        _record_job(
+            job_name,
+            started,
+            status="failed",
+            error=str(exc),
+            gap_warning=False,
+            details=None,
+            session_factory=session_factory,
+        )
+        raise
+    _record_job(
+        job_name,
+        started,
+        status="succeeded",
+        error=None,
+        gap_warning=stats.gap_warning,
+        details={"fetched": stats.fetched, "inserted": stats.inserted, "skipped": stats.skipped},
+        session_factory=session_factory,
+    )
+    logger.info(
+        "%s fetched=%s inserted=%s skipped=%s gap=%s",
+        job_name,
+        stats.fetched,
+        stats.inserted,
+        stats.skipped,
+        stats.gap_warning,
+    )
+    return stats
+
+
+def _fetch(
+    fetch: Callable[[SpotifyClient], Any],
+    *,
+    settings: Settings | None,
+    session_factory: SessionFactory | None,
+    http_client: httpx.Client | None,
+    sleep: Callable[[float], None] | None,
+) -> Any:
+    settings = settings or get_settings()
+    owns_http = http_client is None
+    http = http_client or httpx.Client(timeout=30)
+    try:
+        token = load_access_token(
+            settings=settings,
+            http_client=http,
+            session_factory=session_factory,
+        )
+
+        def refresh() -> str:
+            return load_access_token(
+                settings=settings,
+                http_client=http,
+                session_factory=session_factory,
+                force_refresh=True,
+            )
+
+        client = SpotifyClient(token, http_client=http, refresh=refresh, sleep=sleep)
+        try:
+            return fetch(client)
+        finally:
+            client.close()
+    finally:
+        if owns_http:
+            http.close()
+
+
+def _require_user(session: Session) -> User:
+    user = session.scalar(select(User).order_by(User.id).limit(1))
+    if user is None:
+        raise AuthError("Sign in with `music-discovery auth` before polling.")
+    return user
+
+
+def _record_job(
+    job_name: str,
+    started: datetime,
+    *,
+    status: str,
+    error: str | None,
+    gap_warning: bool,
+    details: dict[str, int] | None,
+    session_factory: SessionFactory | None,
+) -> None:
+    try:
+        with _sessions(session_factory) as session:
+            session.add(
+                JobRun(
+                    job_name=job_name,
+                    started_at=started,
+                    finished_at=datetime.now(timezone.utc),
+                    status=status,
+                    error=error,
+                    gap_warning=gap_warning,
+                    details=details,
+                )
+            )
+    except OperationalError as exc:
+        raise AuthError(f"Database unavailable: {exc.orig}") from exc
+
+
+@contextmanager
+def _sessions(session_factory: SessionFactory | None) -> Iterator[Session]:
+    factory = session_factory or session_scope
+    with factory() as session:
+        yield session
 
 
 def _store_play(session: Session, user: User, item: PlayedItem) -> bool:

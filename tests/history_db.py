@@ -9,16 +9,18 @@ from contextlib import contextmanager
 
 from sqlalchemy import JSON, create_engine, event
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
-from sqlalchemy.orm import Session
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.sql.schema import Column
 from sqlalchemy.types import TypeEngine
 
 from music_discovery.db import Base
+from music_discovery.spotify.auth import SessionFactory
 
 
 @contextmanager
-def history_session() -> Iterator[Session]:
+def _sqlite_engine() -> Iterator[Engine]:
     originals: list[tuple[Column[object], TypeEngine[object]]] = []
     for table in Base.metadata.tables.values():
         for column in table.columns:
@@ -38,18 +40,43 @@ def history_session() -> Iterator[Session]:
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
-    session: Session | None = None
     try:
         Base.metadata.create_all(engine)
-        session = Session(engine)
-        yield session
-        session.commit()
-    except Exception:
-        if session is not None:
-            session.rollback()
-        raise
+        yield engine
     finally:
-        if session is not None:
-            session.close()
         for column, column_type in originals:
             column.type = column_type
+
+
+@contextmanager
+def history_session() -> Iterator[Session]:
+    with _sqlite_engine() as engine:
+        session = Session(engine)
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+
+@contextmanager
+def history_sessions() -> Iterator[SessionFactory]:
+    with _sqlite_engine() as engine:
+        factory = sessionmaker(engine, expire_on_commit=False)
+
+        @contextmanager
+        def sessions() -> Iterator[Session]:
+            session = factory()
+            try:
+                yield session
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+            finally:
+                session.close()
+
+        yield sessions

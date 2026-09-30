@@ -18,6 +18,7 @@ from music_discovery.jobs.weekly import run_weekly
 from music_discovery.models import JobRun, RecommendationRun
 from music_discovery.pipeline.publish import publish_playlist
 from music_discovery.spotify.auth import AuthError, run_oauth
+from music_discovery.spotify.client import SpotifyError
 
 rich_utils.STYLE_COMMANDS_PANEL_BORDER = "cyan"
 rich_utils.STYLE_OPTIONS_PANEL_BORDER = "cyan"
@@ -155,7 +156,12 @@ def auth() -> None:
 @app.command()
 def poll() -> None:
     """Poll recently-played and refresh saved tracks."""
-    _call(run_poll)
+    try:
+        summary = run_poll()
+    except (NotImplementedError, AuthError, SpotifyError) as exc:
+        _stderr().print(_panel(str(exc), title="Poll failed", style="yellow"))
+        raise typer.Exit(code=1) from exc
+    _stdout().print(_panel(summary, title="Poll", style="green"))
 
 
 @app.command()
