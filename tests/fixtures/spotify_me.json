@@ -1,6 +1,21 @@
 {
-  "id": "spotify-user",
   "country": "US",
   "display_name": "Ada",
-  "email": "ada@example.com"
+  "email": "ada@example.com",
+  "explicit_content": {
+    "filter_enabled": false,
+    "filter_locked": false
+  },
+  "external_urls": {
+    "spotify": "https://open.spotify.com/user/spotify-user"
+  },
+  "followers": {
+    "href": null,
+    "total": 12
+  },
+  "href": "https://api.spotify.com/v1/users/spotify-user",
+  "id": "spotify-user",
+  "product": "premium",
+  "type": "user",
+  "uri": "spotify:user:spotify-user"
 }

@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from music_discovery.spotify.client import (
+    ME_URL,
     RECENTLY_PLAYED_URL,
     SAVED_TRACKS_URL,
     SpotifyAuthError,
@@ -25,6 +26,45 @@ def _load(name: str) -> dict[str, object]:
 def _client(handler, **kwargs) -> tuple[httpx.Client, SpotifyClient]:
     http = httpx.Client(transport=httpx.MockTransport(handler))
     return http, SpotifyClient("access-token", http_client=http, **kwargs)
+
+
+def test_get_me_reads_the_current_user():
+    payload = _load("spotify_me.json")
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == httpx.URL(ME_URL)
+        assert str(request.url) == "https://api.spotify.com/v1/me"
+        seen["authorization"] = request.headers["authorization"]
+        return httpx.Response(200, json=payload)
+
+    http, client = _client(handler)
+    with http:
+        user = client.get_me()
+
+    assert seen["authorization"] == "Bearer access-token"
+    assert user.id == "spotify-user"
+    assert user.display_name == "Ada"
+    assert user.country == "US"
+    assert user.email == "ada@example.com"
+    assert user.product == "premium"
+    assert user.follower_count == 12
+    assert user.profile_url == "https://open.spotify.com/user/spotify-user"
+    assert user.uri == "spotify:user:spotify-user"
+    assert user.explicit_content is not None
+    assert user.explicit_content.filter_enabled is False
+    assert user.explicit_content.filter_locked is False
+
+
+def test_get_me_rejects_an_unexpected_profile():
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json={"display_name": "Ada"})
+
+    http, client = _client(handler)
+    with http:
+        with pytest.raises(SpotifyClientError, match="unexpected profile"):
+            client.get_me()
 
 
 def test_recently_played_reads_the_fixture_and_keeps_a_null_track_id():

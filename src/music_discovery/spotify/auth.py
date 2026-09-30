@@ -173,7 +173,7 @@ def refresh_access_token(
         with _sessions(session_factory) as session:
             user = session.scalar(select(User).order_by(User.id).limit(1))
             if user is None:
-                raise AuthError("Sign in with `music-discovery auth` before refreshing.")
+                raise AuthError("Sign in with `music-discovery auth` first.")
             user_id = user.id
             try:
                 refresh_token = decrypt_token(
@@ -202,7 +202,7 @@ def refresh_access_token(
         with _sessions(session_factory) as session:
             user = session.get(User, user_id)
             if user is None:
-                raise AuthError("Sign in with `music-discovery auth` before refreshing.")
+                raise AuthError("Sign in with `music-discovery auth` first.")
             _store_tokens(
                 user,
                 refresh_token=tokens.refresh_token or refresh_token,
@@ -431,13 +431,13 @@ def _request_token(
 def _single_user(session: Session) -> User:
     user = session.scalar(select(User).order_by(User.id).limit(1))
     if user is None:
-        raise AuthError("Sign in with `music-discovery auth` before polling.")
+        raise AuthError("Sign in with `music-discovery auth` first.")
     return user
 
 
 def _decrypt_access(user: User, settings: Settings) -> str:
     if not user.access_token_encrypted:
-        raise AuthError("Sign in with `music-discovery auth` before polling.")
+        raise AuthError("Sign in with `music-discovery auth` first.")
     try:
         return decrypt_token(user.access_token_encrypted, settings.token_encryption_key)
     except ValueError as exc:

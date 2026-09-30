@@ -1,7 +1,8 @@
-"""Typer commands: auth, poll, generate, runs."""
+"""Typer commands: auth, poll, generate, runs, profile."""
 
 from collections.abc import Callable, Sequence
 
+import httpx
 import typer
 import typer.rich_utils as rich_utils
 from rich import box
@@ -12,12 +13,19 @@ from rich.table import Table
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
+from music_discovery.config import get_settings
 from music_discovery.db import session_scope
 from music_discovery.jobs.poll_history import PollError, run_poll
 from music_discovery.jobs.weekly import run_weekly
 from music_discovery.models import JobRun, RecommendationRun
 from music_discovery.pipeline.publish import publish_playlist
-from music_discovery.spotify.auth import AuthError, run_oauth
+from music_discovery.spotify.auth import AuthError, ensure_access_token, run_oauth
+from music_discovery.spotify.client import (
+    SpotifyAuthError,
+    SpotifyClient,
+    SpotifyClientError,
+    SpotifyUser,
+)
 
 rich_utils.STYLE_COMMANDS_PANEL_BORDER = "cyan"
 rich_utils.STYLE_OPTIONS_PANEL_BORDER = "cyan"
@@ -133,6 +141,100 @@ def _recommendations_table(rows: Sequence[RecommendationRun]) -> Table:
     return table
 
 
+_PRODUCT_LABELS = {
+    "premium": "Premium",
+    "free": "Free",
+    "open": "Open",
+}
+
+
+def load_profile(*, http_client: httpx.Client | None = None) -> SpotifyUser:
+    """Read the signed-in account from ``GET /me``."""
+    settings = get_settings()
+    owns_client = http_client is None
+    http = http_client or httpx.Client(timeout=30)
+    try:
+        holder = {
+            "token": ensure_access_token(settings=settings, http_client=http),
+        }
+
+        def token() -> str:
+            return holder["token"]
+
+        def refresh() -> str:
+            holder["token"] = ensure_access_token(
+                settings=settings,
+                http_client=http,
+                force=True,
+            )
+            return holder["token"]
+
+        return SpotifyClient(token, http_client=http, refresh=refresh).get_me()
+    finally:
+        if owns_client:
+            http.close()
+
+
+def _profile_table(user: SpotifyUser) -> Table:
+    table = Table(
+        title="Spotify profile",
+        title_style="bold",
+        box=box.ROUNDED,
+        border_style="cyan",
+        header_style="bold cyan",
+        show_header=False,
+        expand=True,
+    )
+    table.add_column("Field", style="cyan", no_wrap=True)
+    table.add_column("Value")
+    for label, value in _profile_rows(user):
+        table.add_row(label, _cell(value))
+    return table
+
+
+def _profile_rows(user: SpotifyUser) -> list[tuple[str, str | None]]:
+    rows: list[tuple[str, str | None]] = [
+        ("Display name", user.display_name),
+        ("Spotify ID", user.id),
+        ("Country", user.country),
+        ("Subscription", _product_label(user.product)),
+    ]
+    if user.email:
+        rows.append(("Email", user.email))
+    if user.follower_count is not None:
+        rows.append(("Followers", f"{user.follower_count:,}"))
+    explicit = _explicit_label(user)
+    if explicit is not None:
+        rows.append(("Explicit filter", explicit))
+    if user.profile_url:
+        rows.append(("Profile", user.profile_url))
+    if user.uri:
+        rows.append(("URI", user.uri))
+    return rows
+
+
+def _product_label(product: str | None) -> str | None:
+    if not product:
+        return None
+    return _PRODUCT_LABELS.get(product, product)
+
+
+def _explicit_label(user: SpotifyUser) -> str | None:
+    content = user.explicit_content
+    if content is None:
+        return None
+    label = "On" if content.filter_enabled else "Off"
+    if content.filter_locked:
+        return f"{label}, locked"
+    return label
+
+
+def _cell(value: str | None) -> str:
+    if not value:
+        return "[dim]—[/dim]"
+    return escape(value)
+
+
 def _empty(console: Console, title: str, message: str) -> None:
     console.print(
         Panel(
@@ -150,6 +252,20 @@ def _empty(console: Console, title: str, message: str) -> None:
 def auth() -> None:
     """One-time Spotify sign-in. Run on the host; stores an encrypted refresh token."""
     _call(run_oauth)
+
+
+@app.command()
+def profile() -> None:
+    """Show the signed-in Spotify profile."""
+    try:
+        user = load_profile()
+    except (AuthError, SpotifyAuthError) as exc:
+        _stderr().print(_panel(str(exc), title="Not ready", style="yellow"))
+        raise typer.Exit(code=1) from exc
+    except SpotifyClientError as exc:
+        _stderr().print(_panel(str(exc), title="Spotify", style="red"))
+        raise typer.Exit(code=1) from exc
+    _stdout().print(_profile_table(user))
 
 
 @app.command()
