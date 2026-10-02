@@ -26,6 +26,7 @@ def _load(name: str) -> dict[str, object]:
 
 def _client(handler, **kwargs) -> tuple[httpx.Client, SpotifyClient]:
     http = httpx.Client(transport=httpx.MockTransport(handler))
+    kwargs.setdefault("sleep", lambda delay: None)
     return http, SpotifyClient("access-token", http_client=http, **kwargs)
 
 
@@ -208,7 +209,7 @@ def test_rate_limit_sleeps_and_retries():
     with http:
         items = client.get_recently_played()
 
-    assert slept == [2.0]
+    assert 2.0 in slept
     assert calls == 2
     assert items[0].track is not None
     assert items[0].track.id == "track-karma"
@@ -226,7 +227,22 @@ def test_a_persistent_rate_limit_stops():
         with pytest.raises(SpotifyClientError, match="rate limit"):
             client.get_recently_played()
 
-    assert slept == [1.0, 1.0, 1.0]
+    assert slept.count(1.0) == 3
+
+
+def test_a_long_rate_limit_stops_without_waiting():
+    slept: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(429, headers={"retry-after": "81533"}, json={"error": "rate limit"})
+
+    http, client = _client(handler, sleep=slept.append)
+    with http:
+        with pytest.raises(SpotifyClientError, match="22.6 hours"):
+            client.get_recently_played()
+
+    assert slept == []
 
 
 def test_top_artists_and_tracks_send_the_time_range():
@@ -271,10 +287,47 @@ def test_top_artists_and_tracks_send_the_time_range():
     assert tracks[0].id == "track-karma"
 
 
+def test_spotify_error_includes_the_failing_request():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"status": 400, "message": "Invalid limit"}})
+
+    http, client = _client(handler)
+    with http:
+        with pytest.raises(SpotifyClientError, match=r"400\) GET /v1/me: Invalid limit"):
+            client.get_me()
+
+
+def test_artist_albums_stop_once_enough_are_collected():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert "offset" not in request.url.params
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    {"id": f"album-{index}", "name": "Album", "album_type": "album"}
+                    for index in range(10)
+                ],
+                "next": "https://api.spotify.com/v1/artists/artist-drake/albums?offset=10&limit=10",
+            },
+        )
+
+    http, client = _client(handler)
+    with http:
+        albums = client.get_artist_albums("artist-drake", limit=3)
+
+    assert calls == 1
+    assert [album.id for album in albums] == ["album-0", "album-1", "album-2"]
+
+
 def test_artist_albums_skip_compilations_and_album_tracks_page():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/albums"):
             assert request.url.params["include_groups"] == "album"
+            assert request.url.params["limit"] == "10"
             return httpx.Response(
                 200,
                 json={

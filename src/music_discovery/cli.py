@@ -1,5 +1,7 @@
 """Typer commands: auth, profile, poll, played, generate, runs."""
 
+import logging
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -52,6 +54,16 @@ app = typer.Typer(
         "normalized artist + title.[/dim]"
     ),
 )
+
+
+def _configure_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        stream=sys.stderr,
+    )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def _stdout(*, highlight: bool = True) -> Console:
@@ -434,6 +446,7 @@ def generate(
     ),
 ) -> None:
     """Build this week's playlist of tracks you have not played."""
+    _configure_logging()
     try:
         result = run_weekly(publish=not dry_run)
     except (WeeklyError, AuthError) as exc:

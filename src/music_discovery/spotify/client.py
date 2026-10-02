@@ -5,6 +5,7 @@ goes through the resolutions cache. Do not call Spotify's recommendation,
 related-artist, audio-feature, or audio-analysis endpoints.
 """
 
+import logging
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -13,6 +14,8 @@ from urllib.parse import urlsplit
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+logger = logging.getLogger("music_discovery.spotify")
 
 API_ROOT = "https://api.spotify.com/v1"
 ME_URL = f"{API_ROOT}/me"
@@ -24,8 +27,11 @@ SEARCH_URL = f"{API_ROOT}/search"
 PLAYLISTS_URL = f"{API_ROOT}/me/playlists"
 RECENTLY_PLAYED_LIMIT = 50
 SAVED_TRACKS_PAGE_LIMIT = 50
+ARTIST_ALBUMS_PAGE_LIMIT = 10
 
+_MIN_REQUEST_INTERVAL = 0.4
 _MAX_RATE_LIMIT_RETRIES = 3
+_MAX_RATE_LIMIT_WAIT = 10.0
 _MAX_SAVED_PAGES = 400
 _MAX_PAGES = 20
 _TIME_RANGES = frozenset({"short_term", "medium_term", "long_term"})
@@ -224,6 +230,7 @@ class SpotifyClient:
         self._http = http_client
         self._refresh = refresh
         self._sleep = sleep or time.sleep
+        self._last_request: float | None = None
 
     def get_me(self) -> SpotifyUser:
         """GET /me. Identity, market, and the public profile."""
@@ -290,23 +297,25 @@ class SpotifyClient:
             params = None
         return items
 
-    def get_artist_albums(self, artist_id: str) -> list[SpotifyAlbum]:
-        """GET /artists/{id}/albums. Albums only; skip compilations."""
+    def get_artist_albums(self, artist_id: str, *, limit: int | None = None) -> list[SpotifyAlbum]:
+        """GET /artists/{id}/albums. Albums only. Stop once ``limit`` albums are in hand."""
         pages = self._collect_pages(
             f"{API_ROOT}/artists/{artist_id}/albums",
-            params={"include_groups": "album", "limit": 50},
+            params={"include_groups": "album", "limit": ARTIST_ALBUMS_PAGE_LIMIT},
             model=_AlbumPage,
             failure="Spotify returned an unexpected albums response.",
+            max_items=limit,
         )
         return [item for item in pages if isinstance(item, SpotifyAlbum)]
 
-    def get_album_tracks(self, album_id: str) -> list[SpotifyTrack]:
-        """GET /albums/{id}/tracks."""
+    def get_album_tracks(self, album_id: str, *, limit: int | None = None) -> list[SpotifyTrack]:
+        """GET /albums/{id}/tracks. Stop once ``limit`` tracks are in hand."""
         pages = self._collect_pages(
             f"{API_ROOT}/albums/{album_id}/tracks",
             params={"limit": 50},
             model=_TrackPage,
             failure="Spotify returned an unexpected album-tracks response.",
+            max_items=limit,
         )
         return [item for item in pages if isinstance(item, SpotifyTrack)]
 
@@ -411,6 +420,7 @@ class SpotifyClient:
         params: _Query,
         model: type[_ArtistPage] | type[_TrackPage] | type[_AlbumPage] | type[_PlaylistPage],
         failure: str,
+        max_items: int | None = None,
     ) -> list[SpotifyArtist] | list[SpotifyTrack] | list[SpotifyAlbum] | list[SpotifyPlaylist]:
         found: list[SpotifyArtist | SpotifyTrack | SpotifyAlbum | SpotifyPlaylist] = []
         next_url: str | None = url
@@ -426,9 +436,20 @@ class SpotifyClient:
             except ValidationError as exc:
                 raise SpotifyClientError(failure) from exc
             found.extend(page.items)
+            if max_items is not None and len(found) >= max_items:
+                return found[:max_items]
             next_url = _next_page(page.next)
             query = None
         return found
+
+    def _pace(self) -> None:
+        now = time.monotonic()
+        if self._last_request is not None:
+            wait = _MIN_REQUEST_INTERVAL - (now - self._last_request)
+            if wait > 0:
+                self._sleep(wait)
+                now = time.monotonic()
+        self._last_request = now
 
     def _get_json(self, url: str, *, params: _Query | None) -> dict[str, object]:
         with self._session() as http:
@@ -478,6 +499,7 @@ class SpotifyClient:
         token_override: str | None = None
         while True:
             token = token_override if token_override is not None else self._token()
+            self._pace()
             response = http.request(
                 method,
                 url,
@@ -495,15 +517,27 @@ class SpotifyClient:
                 refreshed = True
                 continue
             if response.status_code == 429:
+                delay = _retry_after(response)
+                path = urlsplit(url).path
+                if delay > _MAX_RATE_LIMIT_WAIT:
+                    raise SpotifyClientError(
+                        f"Spotify rate limit on {path}. "
+                        f"The API asked for a {_wait_label(delay)} wait, so this run stopped."
+                    )
                 if rate_limits >= _MAX_RATE_LIMIT_RETRIES:
                     raise SpotifyClientError("Spotify rate limit persisted.")
                 rate_limits += 1
-                self._sleep(_retry_after(response))
+                logger.info("Spotify rate limit on %s, waiting %.0fs", path, delay)
+                self._sleep(delay)
                 continue
             if response.status_code == 404 and missing_ok:
+                logger.info("%s %s -> 404 skipped", method, urlsplit(url).path)
                 return None
             if response.status_code not in (200, 201):
-                raise SpotifyClientError(f"Spotify request failed ({response.status_code}).")
+                message = _failure_message(response)
+                logger.error("%s", message)
+                raise SpotifyClientError(message)
+            logger.info("%s %s -> %s", method, urlsplit(url).path, response.status_code)
             try:
                 body = response.json()
             except ValueError as exc:
@@ -511,6 +545,30 @@ class SpotifyClient:
             if not isinstance(body, dict):
                 raise SpotifyClientError("Spotify returned an unexpected response.")
             return body
+
+
+def _failure_message(response: httpx.Response) -> str:
+    path = urlsplit(str(response.request.url)).path
+    message = _error_message(response)
+    detail = f": {message}" if message else ""
+    return f"Spotify request failed ({response.status_code}) {response.request.method} {path}{detail}."
+
+
+def _error_message(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    error = body.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        if isinstance(message, str):
+            return message.strip()
+    if isinstance(error, str):
+        return error.strip()
+    return ""
 
 
 def _require_time_range(time_range: str) -> None:
@@ -529,6 +587,14 @@ def _next_page(url: str | None) -> str | None:
 def _spotify_api_url(url: str) -> bool:
     parts = urlsplit(url)
     return parts.scheme == "https" and parts.hostname == "api.spotify.com"
+
+
+def _wait_label(seconds: float) -> str:
+    if seconds >= 3600:
+        return f"{seconds / 3600:.1f} hours"
+    if seconds >= 60:
+        return f"{seconds / 60:.0f} minute"
+    return f"{seconds:.0f} second"
 
 
 def _retry_after(response: httpx.Response) -> float:

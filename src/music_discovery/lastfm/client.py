@@ -8,6 +8,7 @@ returns playcount, not similarity.
 
 import hashlib
 import json
+import logging
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -19,6 +20,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from music_discovery.models import LastfmCache
+
+logger = logging.getLogger("music_discovery.lastfm")
 
 API_URL = "https://ws.audioscrobbler.com/2.0/"
 _MAX_BACKOFFS = 4
@@ -173,11 +176,16 @@ class LastFmClient:
                 attempt += 1
                 continue
             if response.status_code != 200:
-                raise LastFmError(f"Last.fm request failed ({response.status_code}).")
+                error = LastFmError(f"Last.fm request failed ({response.status_code}) {method}.")
+                logger.error("%s", error)
+                raise error
             if isinstance(body.get("error"), int):
                 message = body.get("message")
                 detail = message if isinstance(message, str) and message else "Last.fm request failed."
-                raise LastFmError(detail)
+                error = LastFmError(f"{detail} ({method}).")
+                logger.error("%s", error)
+                raise error
+            logger.info("Last.fm %s ok", method)
             return body
 
     def _throttle(self) -> None:

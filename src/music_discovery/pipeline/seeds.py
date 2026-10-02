@@ -1,9 +1,12 @@
 """Seed gathering from top artists, top tracks, and a sample of saved tracks."""
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from music_discovery.spotify.client import SpotifyClient
+
+logger = logging.getLogger("music_discovery.pipeline.seeds")
 
 MAX_SEED_ARTISTS = 30
 MAX_SEED_TRACKS = 40
@@ -48,31 +51,25 @@ def gather_seeds(client: SpotifyClient, saved: Sequence[SavedSeed] = ()) -> Seed
     """
     artists = _artist_seeds(client)
     tracks = _track_seeds(client, saved)
-    artists = _fill_artists_from_tracks(client, artists, tracks)
+    artists = _fill_artists_from_tracks(artists, tracks)
     return SeedSet(artists=tuple(artists), tracks=tuple(tracks))
 
 
 def _artist_seeds(client: SpotifyClient) -> list[ArtistSeed]:
     found: list[ArtistSeed] = []
     seen: set[str] = set()
-    _take_artists(
-        found,
-        seen,
-        client.get_top_artists(time_range="medium_term"),
-        limit=MAX_SEED_ARTISTS,
-    )
-    _take_artists(
-        found,
-        seen,
-        client.get_top_artists(time_range="long_term"),
-        limit=MAX_SEED_ARTISTS,
-    )
-    _take_artists(
-        found,
-        seen,
-        client.get_top_artists(time_range="short_term"),
-        limit=SHORT_TERM_ARTISTS,
-    )
+    for time_range, limit in (
+        ("medium_term", MAX_SEED_ARTISTS),
+        ("long_term", MAX_SEED_ARTISTS),
+        ("short_term", SHORT_TERM_ARTISTS),
+    ):
+        logger.info("Top artists %s", time_range.replace("_", " "))
+        _take_artists(
+            found,
+            seen,
+            client.get_top_artists(time_range=time_range),
+            limit=limit,
+        )
     return found
 
 
@@ -97,9 +94,13 @@ def _take_artists(found: list[ArtistSeed], seen: set[str], artists, *, limit: in
 def _track_seeds(client: SpotifyClient, saved: Sequence[SavedSeed]) -> list[TrackSeed]:
     found: list[TrackSeed] = []
     seen: set[str] = set()
-    _take_tracks(found, seen, client.get_top_tracks(time_range="medium_term"), limit=MAX_SEED_TRACKS)
-    _take_tracks(found, seen, client.get_top_tracks(time_range="long_term"), limit=MAX_SEED_TRACKS)
-    _take_tracks(found, seen, client.get_top_tracks(time_range="short_term"), limit=SHORT_TERM_TRACKS)
+    for time_range, limit in (
+        ("medium_term", MAX_SEED_TRACKS),
+        ("long_term", MAX_SEED_TRACKS),
+        ("short_term", SHORT_TERM_TRACKS),
+    ):
+        logger.info("Top tracks %s", time_range.replace("_", " "))
+        _take_tracks(found, seen, client.get_top_tracks(time_range=time_range), limit=limit)
     room = MAX_SEED_TRACKS - len(found)
     for saved_track in _sample(saved, room):
         if saved_track.spotify_id in seen:
@@ -142,10 +143,14 @@ def _take_tracks(found: list[TrackSeed], seen: set[str], tracks, *, limit: int) 
 
 
 def _fill_artists_from_tracks(
-    client: SpotifyClient,
     artists: list[ArtistSeed],
     tracks: Sequence[TrackSeed],
 ) -> list[ArtistSeed]:
+    """Add track artists that are not already seeds.
+
+    Genres stay whatever ``GET /me/top/artists`` returned. A second fetch per
+    artist is not required to build or score a playlist.
+    """
     seen = {artist.spotify_id for artist in artists}
     for track in tracks:
         if len(artists) >= MAX_SEED_ARTISTS:
@@ -154,22 +159,7 @@ def _fill_artists_from_tracks(
             continue
         seen.add(track.artist_id)
         artists.append(ArtistSeed(spotify_id=track.artist_id, name=track.artist, genres=frozenset()))
-    missing = [artist.spotify_id for artist in artists if not artist.genres]
-    if not missing:
-        return artists
-    looked_up = {
-        artist.id: frozenset(genre for genre in artist.genres if genre)
-        for artist in client.get_artists(missing)
-        if artist.id
-    }
-    return [
-        ArtistSeed(
-            spotify_id=artist.spotify_id,
-            name=artist.name,
-            genres=looked_up.get(artist.spotify_id, artist.genres),
-        )
-        for artist in artists
-    ]
+    return artists
 
 
 def _sample[T](items: Sequence[T], count: int) -> list[T]:

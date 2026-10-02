@@ -26,8 +26,8 @@ What remains, and what the pipeline uses:
 | Identity and market | `GET /me` |
 | Plays | `GET /me/player/recently-played` |
 | Seeds | `GET /me/top/artists`, `GET /me/top/tracks`, `GET /me/tracks` |
-| Deep cuts | `GET /artists/{id}/albums`, `GET /albums/{id}/tracks`, `GET /tracks/{id}` |
-| Genre overlap | `GET /artists/{id}` (`genres` is still on the artist object) |
+| Deep cuts | `GET /artists/{id}/albums`, `GET /albums/{id}/tracks` |
+| Genre overlap | genres on `GET /me/top/artists` |
 | Name to playable id | `GET /search?type=track` |
 | Delivery | `POST /me/playlists`, `PUT /playlists/{id}/items` |
 
@@ -124,7 +124,7 @@ The run loads the user, refreshes the token, and inserts a `recommendation_runs`
 
 *Similar tracks.* For each seed track, `track.getSimilar`. Store the raw match. Do not compare it with artist matches until both are normalized inside the run.
 
-*Deep cuts.* For artists the user already likes, list albums (`include_groups=album`, skip compilations), then album tracks. Fetch each full track object so popularity is available. Drop the artist’s obvious hits (high popularity, or anything Last.fm ranks in their top tracks) and anything already in history. What remains is catalog the user likes the artist for but has not played. These candidates have no Last.fm match; they carry an inverse-popularity signal and a genre overlap of 1.0 because the artist is already the user’s.
+*Deep cuts.* For artists the user already likes, list albums (`include_groups=album`, skip compilations), then album tracks. Drop the artist’s obvious hits (high popularity when the album track includes it, or anything Last.fm ranks in their top tracks) and anything already in history. What remains is catalog the user likes the artist for but has not played. These candidates have no Last.fm match; they carry an inverse-popularity signal and a genre overlap of 1.0 because the artist is already the user’s.
 
 Throttle Last.fm to about 4 requests per second. On error 29 or HTTP 429, exponential backoff. Read the cache before every call.
 

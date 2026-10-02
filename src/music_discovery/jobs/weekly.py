@@ -115,10 +115,15 @@ def run_weekly(
         )
         return result
     except WeeklyError as exc:
+        logger.error("Generate failed: %s", exc)
         _record_failure(JOB_WEEKLY, started, exc, session_factory)
         raise
     except Exception as exc:
         reported = _weekly_error(exc)
+        if reported is exc:
+            logger.exception("Generate failed")
+        else:
+            logger.error("Generate failed: %s", reported)
         _record_failure(JOB_WEEKLY, started, reported, session_factory)
         if reported is exc:
             raise
@@ -156,6 +161,7 @@ def _generate(
                 details={"skipped": True, "playlist_id": run.spotify_playlist_id},
             )
         )
+        logger.info("Week %s already has playlist %s", start, run.spotify_playlist_id)
         return WeeklyResult(
             status="published",
             week_start=start,
@@ -163,6 +169,7 @@ def _generate(
             playlist_id=run.spotify_playlist_id,
             message=f"This week already has a playlist ({playlist_name(start)}).",
         )
+    logger.info("Week %s, %s", start, "publish" if publish else "dry run")
     if run is None:
         run = RecommendationRun(
             user_id=user.id,
@@ -185,8 +192,14 @@ def _generate(
     )
     saved = _saved_seeds(session, user.id)
     seeds = gather_seeds(client, saved)
-    named = similar_artist_candidates(lastfm, seeds) + similar_track_candidates(lastfm, seeds)
+    logger.info("Seeds ready: artists=%s tracks=%s", len(seeds.artists), len(seeds.tracks))
+    similar_artists = similar_artist_candidates(lastfm, seeds)
+    logger.info("Similar artists ready: %s tracks", len(similar_artists))
+    similar_tracks = similar_track_candidates(lastfm, seeds)
+    logger.info("Similar tracks ready: %s tracks", len(similar_tracks))
+    named = similar_artists + similar_tracks
     deep_cuts = deep_cut_candidates(client, lastfm, seeds, today=today)
+    logger.info("Deep cuts ready: %s tracks", len(deep_cuts))
     resolved, misses = resolve_candidates(
         session,
         client,
@@ -195,14 +208,22 @@ def _generate(
         seed_genres={genre for artist in seeds.artists for genre in artist.genres},
         today=today,
     )
+    logger.info("Resolved %s tracks, %s misses", len(resolved), misses)
     session.commit()
     pooled = [*resolved, *deep_cuts]
     exclusions = _exclusions(session, user.id, today)
     filtered = filter_candidates(pooled, exclusions)
+    logger.info(
+        "Filtered to %s tracks (%s already heard, %s recently offered)",
+        len(filtered.candidates),
+        filtered.hard_excluded,
+        filtered.soft_excluded,
+    )
     selection = select_tracks(
         score_candidates(filtered.candidates, settings.score_weights()),
         settings.selection_caps(),
     )
+    logger.info("Selected %s tracks", len(selection.tracks))
     gap_warning = _latest_gap(session)
     stats = {
         "seeds": {"artists": len(seeds.artists), "tracks": len(seeds.tracks)},
@@ -229,6 +250,7 @@ def _generate(
                 gap_warning=gap_warning,
             )
         )
+        logger.error("%s", run.error)
         return WeeklyResult(
             status="failed",
             week_start=start,
@@ -239,17 +261,20 @@ def _generate(
 
     playlist_id = run.spotify_playlist_id
     if publish:
+        logger.info("Publishing %s", playlist_name(start))
         playlist_id = publish_playlist(
             client,
             user_id=user.spotify_user_id,
             day=start,
             track_ids=[item.candidate.spotify_track_id for item in selection.tracks],
         )
-        _store_items(session, client, run, selection.tracks)
+        _store_items(session, run, selection.tracks)
         run.spotify_playlist_id = playlist_id
         run.status = "published"
+        logger.info("Published playlist %s", playlist_id)
         message = f"Published {playlist_name(start)} ({len(selection.tracks)} tracks)."
     else:
+        logger.info("Dry run finished. Nothing was added to Spotify.")
         run.status = "dry_run"
         message = (
             f"Dry run for {playlist_name(start)} "
@@ -274,7 +299,6 @@ def _generate(
 
 def _store_items(
     session: Session,
-    client: SpotifyClient,
     run: RecommendationRun,
     selected: Sequence[ScoredCandidate],
 ) -> None:
@@ -283,14 +307,9 @@ def _store_items(
     )
     if existing is not None:
         return
-    tracks = {
-        track.id: track
-        for track in client.get_tracks([item.candidate.spotify_track_id for item in selected])
-        if track.id
-    }
     for item in selected:
         candidate = item.candidate
-        _ensure_track(session, tracks.get(candidate.spotify_track_id), candidate)
+        _ensure_track(session, None, candidate)
         session.add(
             RecommendationItem(
                 run_id=run.id,

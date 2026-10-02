@@ -1,5 +1,6 @@
 """Resolve Last.fm names to Spotify track ids."""
 
+import logging
 from collections.abc import Sequence
 from datetime import date, datetime, timezone
 from difflib import SequenceMatcher
@@ -12,6 +13,8 @@ from music_discovery.models import Resolution
 from music_discovery.pipeline.candidates import NamedTrack, genre_jaccard, release_recency
 from music_discovery.pipeline.types import Candidate
 from music_discovery.spotify.client import SpotifyClient, SpotifyTrack
+
+logger = logging.getLogger("music_discovery.pipeline.resolve")
 
 ACCEPT_THRESHOLD = 0.8
 COMPILATION_PENALTY = 0.2
@@ -32,6 +35,7 @@ def resolve_candidates(
     """
     misses = 0
     pending: list[tuple[NamedTrack, str]] = []
+    found_tracks: dict[str, SpotifyTrack] = {}
     seen: set[tuple[str, str]] = set()
     for item in named:
         artist_key = normalize(item.artist)
@@ -48,10 +52,13 @@ def resolve_candidates(
         )
         if cached is not None:
             if cached.spotify_track_id:
+                logger.info("Cached %s — %s", item.artist, item.title)
                 pending.append((item, cached.spotify_track_id))
             else:
+                logger.info("Cached miss %s — %s", item.artist, item.title)
                 misses += 1
             continue
+        logger.info("Search %s — %s", item.artist, item.title)
         chosen = _best_hit(
             item,
             client.search_tracks(_search_query(item.artist, item.title), market=market, limit=5),
@@ -65,30 +72,31 @@ def resolve_candidates(
             )
         )
         if chosen is None or not chosen.id:
+            logger.info("No Spotify match %s — %s", item.artist, item.title)
             misses += 1
             continue
+        logger.info("Matched %s — %s", item.artist, item.title)
+        found_tracks[chosen.id] = chosen
         pending.append((item, chosen.id))
     session.flush()
 
-    tracks = {
-        track.id: track
-        for track in client.get_tracks([track_id for _, track_id in pending])
-        if track.id
-    }
-    artist_ids: list[str] = []
-    for track in tracks.values():
-        artist_ids.extend(artist.id for artist in track.artists if artist.id)
-    genres_by_artist = {
-        artist.id: {_genre(genre) for genre in artist.genres}
-        for artist in client.get_artists(list(dict.fromkeys(artist_ids)))
-        if artist.id
-    }
     seed_genre_set = {_genre(genre) for genre in seed_genres}
     resolved: list[Candidate] = []
     for item, track_id in pending:
-        track = tracks.get(track_id)
+        track = found_tracks.get(track_id)
         if track is None:
-            misses += 1
+            resolved.append(
+                Candidate(
+                    spotify_track_id=track_id,
+                    artist=item.artist,
+                    title=item.title,
+                    source=item.source,
+                    similarity=item.similarity,
+                    genre_overlap=0.0,
+                    recency=0.0,
+                    seed_id=item.seed_id,
+                )
+            )
             continue
         primary = track.artists[0].name.strip() if track.artists else item.artist
         if not primary or not track.name.strip():
@@ -96,8 +104,7 @@ def resolve_candidates(
             continue
         artist_genres: set[str] = set()
         for artist in track.artists:
-            if artist.id:
-                artist_genres |= genres_by_artist.get(artist.id, set())
+            artist_genres.update(_genre(genre) for genre in artist.genres)
         release = track.album.release_date if track.album is not None else None
         resolved.append(
             Candidate(

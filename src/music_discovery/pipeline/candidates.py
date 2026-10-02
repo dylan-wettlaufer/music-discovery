@@ -1,5 +1,6 @@
 """Candidate sources: similar artists, similar tracks, and deep cuts."""
 
+import logging
 from dataclasses import dataclass
 from datetime import date
 
@@ -9,6 +10,8 @@ from music_discovery.pipeline.score import inverse_popularity
 from music_discovery.pipeline.seeds import SeedSet
 from music_discovery.pipeline.types import Candidate, Source
 from music_discovery.spotify.client import SpotifyClient
+
+logger = logging.getLogger("music_discovery.pipeline.candidates")
 
 SIMILAR_ARTIST_LIMIT = 20
 SIMILAR_ARTISTS_KEPT = 15
@@ -38,7 +41,9 @@ def similar_artist_candidates(lastfm: LastFmClient, seeds: SeedSet) -> list[Name
     """
     seed_names = {normalize(artist.name) for artist in seeds.artists}
     best: dict[str, tuple[float, str, str]] = {}
-    for artist in seeds.artists:
+    artists = seeds.artists
+    for index, artist in enumerate(artists, start=1):
+        logger.info("Similar artists %s/%s %s", index, len(artists), artist.name)
         for similar in lastfm.get_similar_artists(artist.name, limit=SIMILAR_ARTIST_LIMIT):
             key = normalize(similar.name)
             if not key or key in seed_names:
@@ -71,7 +76,9 @@ def similar_track_candidates(lastfm: LastFmClient, seeds: SeedSet) -> list[Named
     """Last.fm ``track.getSimilar``. Store the raw match; normalize it later."""
     found: list[NamedTrack] = []
     seen: set[str] = set()
-    for track in seeds.tracks:
+    tracks = seeds.tracks
+    for index, track in enumerate(tracks, start=1):
+        logger.info("Similar tracks %s/%s %s — %s", index, len(tracks), track.artist, track.title)
         for similar in lastfm.get_similar_tracks(
             track.artist,
             track.title,
@@ -106,37 +113,33 @@ def deep_cut_candidates(
 ) -> list[Candidate]:
     """Album tracks from artists the user already likes, with hits removed."""
     found: list[Candidate] = []
-    for artist in seeds.artists:
+    artists = seeds.artists
+    for index, artist in enumerate(artists, start=1):
+        logger.info("Deep cuts %s/%s %s", index, len(artists), artist.name)
         hit_names = {
             normalize(track.name)
             for track in lastfm.get_top_tracks(artist.name, limit=TOP_TRACKS_PER_ARTIST)
         }
         albums = [
             album
-            for album in spotify.get_artist_albums(artist.spotify_id)
+            for album in spotify.get_artist_albums(artist.spotify_id, limit=DEEP_CUT_ALBUMS)
             if album.id and album.album_type != "compilation"
         ][:DEEP_CUT_ALBUMS]
-        ordered_ids: list[str] = []
-        release_dates: dict[str, str | None] = {}
+        ordered: list[tuple[SpotifyTrack, str | None]] = []
+        seen_ids: set[str] = set()
         for album in albums:
             if album.id is None:
                 continue
-            for track in spotify.get_album_tracks(album.id):
-                if not track.id or track.id in release_dates:
+            for track in spotify.get_album_tracks(album.id, limit=50):
+                if not track.id or track.id in seen_ids:
                     continue
-                ordered_ids.append(track.id)
-                release_dates[track.id] = album.release_date
-        full = {
-            track.id: track
-            for track in spotify.get_tracks(ordered_ids)
-            if track.id
-        }
+                seen_ids.add(track.id)
+                ordered.append((track, album.release_date))
         kept = 0
-        for track_id in ordered_ids:
+        for track, album_release in ordered:
             if kept >= DEEP_CUT_TRACKS:
                 break
-            track = full.get(track_id)
-            if track is None or not track.name.strip():
+            if not track.id or not track.name.strip():
                 continue
             if track.popularity is not None and track.popularity >= HIT_POPULARITY:
                 continue
@@ -149,10 +152,10 @@ def deep_cut_candidates(
             if track.album is not None and track.album.release_date:
                 release = track.album.release_date
             else:
-                release = release_dates.get(track_id)
+                release = album_release
             found.append(
                 Candidate(
-                    spotify_track_id=track_id,
+                    spotify_track_id=track.id,
                     artist=primary,
                     title=track.name.strip(),
                     source=Source.DEEP_CUT,
@@ -164,6 +167,7 @@ def deep_cut_candidates(
                 )
             )
             kept += 1
+        logger.info("Deep cuts %s kept %s", artist.name, kept)
     return found
 
 

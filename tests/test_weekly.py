@@ -1,4 +1,5 @@
 import json
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
@@ -222,7 +223,7 @@ def _seed_history(session: Session) -> None:
     )
 
 
-def test_a_played_song_and_its_remaster_are_absent(weekly_db, monkeypatch):
+def test_a_played_song_and_its_remaster_are_absent(weekly_db, monkeypatch, caplog):
     monkeypatch.setattr(
         "music_discovery.jobs.weekly.ensure_access_token",
         lambda **kwargs: "token",
@@ -231,7 +232,7 @@ def test_a_played_song_and_its_remaster_are_absent(weekly_db, monkeypatch):
     with weekly_db() as session:
         _seed_history(session)
     http = httpx.Client(transport=httpx.MockTransport(_handler(publish=False, posts=posts)))
-    with http:
+    with caplog.at_level(logging.INFO), http:
         result = run_weekly(
             publish=False,
             settings=_settings(),
@@ -241,6 +242,10 @@ def test_a_played_song_and_its_remaster_are_absent(weekly_db, monkeypatch):
             today=_TODAY,
         )
 
+    assert "Seeds ready: artists=1 tracks=1" in caplog.text
+    assert "Similar artists 1/1 Radiohead" in caplog.text
+    assert "Deep cuts ready:" in caplog.text
+    assert "Dry run finished" in caplog.text
     selected = {item.candidate.spotify_track_id for item in result.selected}
     assert "track-karma" not in selected
     assert "track-karma-remaster" not in selected
@@ -398,10 +403,6 @@ def test_seed_caps_prefer_medium_term_and_sample_saved_tracks():
         def get_top_tracks(self, *, time_range: str, limit: int = 50) -> list[SpotifyTrack]:
             del limit
             return tracks[time_range]
-
-        def get_artists(self, artist_ids: list[str]) -> list[SpotifyArtist]:
-            del artist_ids
-            return []
 
     saved = [
         SavedSeed(spotify_id=f"saved-{index}", artist="Radiohead", title=f"Cut {index}", artist_id=None)
