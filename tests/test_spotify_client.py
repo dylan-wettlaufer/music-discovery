@@ -303,23 +303,19 @@ def test_artist_albums_skip_compilations_and_album_tracks_page():
     assert tracks[0].id == "track-deep"
 
 
-def test_batched_tracks_and_artists_and_market_search():
+def test_tracks_and_artists_are_fetched_one_at_a_time_and_market_search():
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v1/tracks":
-            assert request.url.params["ids"] == "track-a,track-b"
+        if request.url.path.startswith("/v1/tracks/"):
+            track_id = request.url.path.rsplit("/", 1)[-1]
+            if track_id == "track-b":
+                return httpx.Response(404, json={"error": {"status": 404}})
+            assert track_id == "track-a"
+            return httpx.Response(200, json={"id": "track-a", "name": "A", "popularity": 10})
+        if request.url.path.startswith("/v1/artists/"):
+            assert request.url.path == "/v1/artists/artist-portishead"
             return httpx.Response(
                 200,
-                json={
-                    "tracks": [
-                        {"id": "track-a", "name": "A", "popularity": 10},
-                        None,
-                    ]
-                },
-            )
-        if request.url.path == "/v1/artists":
-            return httpx.Response(
-                200,
-                json={"artists": [{"id": "artist-portishead", "name": "Portishead", "genres": ["trip hop"]}]},
+                json={"id": "artist-portishead", "name": "Portishead", "genres": ["trip hop"]},
             )
         assert request.url.copy_with(query=None) == httpx.URL(SEARCH_URL)
         assert request.url.params["type"] == "track"
@@ -358,10 +354,11 @@ def test_create_playlist_is_private_and_can_be_found_by_name():
             body = json.loads(request.content)
             assert body["public"] is False
             assert body["name"] == "Fresh — Sep 27"
-            assert request.url.path == "/v1/users/spotify-user/playlists"
+            assert request.url.path == "/v1/me/playlists"
             return httpx.Response(201, json={"id": "playlist-1", "name": body["name"]})
         if request.method == "PUT":
             body = json.loads(request.content)
+            assert request.url.path == "/v1/playlists/playlist-1/items"
             assert body["uris"] == ["spotify:track:track-glory"]
             return httpx.Response(200, json={"snapshot_id": "snap"})
         if request.method == "POST":

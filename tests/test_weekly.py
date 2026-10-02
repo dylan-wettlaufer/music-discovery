@@ -180,13 +180,13 @@ def _handler(*, publish: bool, posts: list[str]):
             title = query.split('track:"', 1)[1].split('"', 1)[0]
             chosen = next(track for track in _CATALOG.values() if track["name"] == title)
             return httpx.Response(200, json={"tracks": {"items": [chosen]}})
-        if path == "/v1/tracks":
-            ids = request.url.params["ids"].split(",")
-            return httpx.Response(200, json={"tracks": [_CATALOG[track_id] for track_id in ids]})
-        if path == "/v1/artists":
+        if path.startswith("/v1/tracks/"):
+            track_id = path.rsplit("/", 1)[-1]
+            return httpx.Response(200, json=_CATALOG[track_id])
+        if path.startswith("/v1/artists/") and not path.endswith("/albums"):
             return httpx.Response(
                 200,
-                json={"artists": [{"id": "artist-radiohead", "name": "Radiohead", "genres": ["art rock"]}]},
+                json={"id": "artist-radiohead", "name": "Radiohead", "genres": ["art rock"]},
             )
         if path == "/v1/me/playlists":
             return httpx.Response(200, json={"items": [], "next": None})
@@ -288,7 +288,7 @@ def test_publish_creates_one_playlist_and_a_retry_adopts_the_week(weekly_db, mon
 
     assert first.playlist_id == "playlist-fresh"
     assert second.playlist_id == "playlist-fresh"
-    assert posts == ["POST /v1/users/spotify-user/playlists", "PUT /v1/playlists/playlist-fresh/tracks"]
+    assert posts == ["POST /v1/me/playlists", "PUT /v1/playlists/playlist-fresh/items"]
     with weekly_db() as session:
         items = session.scalars(select(RecommendationItem)).all()
         assert {item.spotify_track_id for item in items} == {"track-fishes", "track-glory"}
@@ -323,10 +323,10 @@ def test_fewer_than_the_minimum_publishes_nothing(weekly_db, monkeypatch):
             return httpx.Response(200, json={"items": items})
         if request.url.path == "/v1/search":
             return httpx.Response(200, json={"tracks": {"items": [_CATALOG["track-karma"]]}})
-        if request.url.path == "/v1/tracks":
-            return httpx.Response(200, json={"tracks": [_CATALOG["track-karma"]]})
-        if request.url.path == "/v1/artists":
-            return httpx.Response(200, json={"artists": []})
+        if request.url.path.startswith("/v1/tracks/"):
+            return httpx.Response(200, json=_CATALOG["track-karma"])
+        if request.url.path.startswith("/v1/artists/") and not request.url.path.endswith("/albums"):
+            return httpx.Response(404, json={"error": {"status": 404}})
         if request.url.path.endswith("/albums"):
             return httpx.Response(200, json={"items": []})
         return httpx.Response(500, json={"path": request.url.path})

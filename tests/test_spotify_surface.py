@@ -5,6 +5,10 @@ _REMOVED = (
     "/audio-features",
     "/audio-analysis",
     "/related-artists",
+    'f"{API_ROOT}/tracks"',
+    'f"{API_ROOT}/artists"',
+    "/users/{user_id}/playlists",
+    "/playlists/{playlist_id}/tracks",
 )
 
 

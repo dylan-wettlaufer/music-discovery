@@ -24,7 +24,6 @@ SEARCH_URL = f"{API_ROOT}/search"
 PLAYLISTS_URL = f"{API_ROOT}/me/playlists"
 RECENTLY_PLAYED_LIMIT = 50
 SAVED_TRACKS_PAGE_LIMIT = 50
-TRACK_BATCH_SIZE = 50
 
 _MAX_RATE_LIMIT_RETRIES = 3
 _MAX_SAVED_PAGES = 400
@@ -312,41 +311,31 @@ class SpotifyClient:
         return [item for item in pages if isinstance(item, SpotifyTrack)]
 
     def get_tracks(self, track_ids: Sequence[str]) -> list[SpotifyTrack]:
-        """Batched GET /tracks."""
+        """GET /tracks/{id} for each id. A missing track is skipped."""
         found: list[SpotifyTrack] = []
-        for chunk in _chunks(track_ids, TRACK_BATCH_SIZE):
-            payload = self._get_json(f"{API_ROOT}/tracks", params={"ids": ",".join(chunk)})
-            rows = payload.get("tracks")
-            if not isinstance(rows, list):
-                raise SpotifyClientError("Spotify returned an unexpected tracks response.")
-            for row in rows:
-                if not row:
-                    continue
-                try:
-                    found.append(SpotifyTrack.model_validate(row))
-                except ValidationError as exc:
-                    raise SpotifyClientError(
-                        "Spotify returned an unexpected tracks response."
-                    ) from exc
+        for track_id in track_ids:
+            payload = self._get_optional_json(f"{API_ROOT}/tracks/{track_id}")
+            if payload is None:
+                continue
+            try:
+                found.append(SpotifyTrack.model_validate(payload))
+            except ValidationError as exc:
+                raise SpotifyClientError("Spotify returned an unexpected tracks response.") from exc
         return found
 
     def get_artists(self, artist_ids: Sequence[str]) -> list[SpotifyArtist]:
-        """Batched GET /artists. Genres still live on the artist object."""
+        """GET /artists/{id} for each id. Genres still live on the artist object."""
         found: list[SpotifyArtist] = []
-        for chunk in _chunks(artist_ids, TRACK_BATCH_SIZE):
-            payload = self._get_json(f"{API_ROOT}/artists", params={"ids": ",".join(chunk)})
-            rows = payload.get("artists")
-            if not isinstance(rows, list):
-                raise SpotifyClientError("Spotify returned an unexpected artists response.")
-            for row in rows:
-                if not row:
-                    continue
-                try:
-                    found.append(SpotifyArtist.model_validate(row))
-                except ValidationError as exc:
-                    raise SpotifyClientError(
-                        "Spotify returned an unexpected artists response."
-                    ) from exc
+        for artist_id in artist_ids:
+            payload = self._get_optional_json(f"{API_ROOT}/artists/{artist_id}")
+            if payload is None:
+                continue
+            try:
+                found.append(SpotifyArtist.model_validate(payload))
+            except ValidationError as exc:
+                raise SpotifyClientError(
+                    "Spotify returned an unexpected artists response."
+                ) from exc
         return found
 
     def search_tracks(
@@ -370,10 +359,10 @@ class SpotifyClient:
         return page.tracks.items
 
     def create_playlist(self, user_id: str, name: str, *, description: str = "") -> str:
-        """POST /users/{id}/playlists. Private. Returns the new playlist id."""
+        """POST /me/playlists for the signed-in user. ``user_id`` is unused. Returns the new id."""
         payload = self._send_json(
             "POST",
-            f"{API_ROOT}/users/{user_id}/playlists",
+            f"{API_ROOT}/me/playlists",
             json_body={
                 "name": name,
                 "public": False,
@@ -387,18 +376,18 @@ class SpotifyClient:
             raise SpotifyClientError("Spotify returned an unexpected playlist response.") from exc
 
     def add_playlist_tracks(self, playlist_id: str, uris: Sequence[str]) -> None:
-        """POST /playlists/{id}/tracks."""
+        """POST /playlists/{id}/items."""
         self._send_json(
             "POST",
-            f"{API_ROOT}/playlists/{playlist_id}/tracks",
+            f"{API_ROOT}/playlists/{playlist_id}/items",
             json_body={"uris": list(uris)},
         )
 
     def replace_playlist_tracks(self, playlist_id: str, uris: Sequence[str]) -> None:
-        """PUT /playlists/{id}/tracks. Replaces the list so a retry stays idempotent."""
+        """PUT /playlists/{id}/items. Replaces the list so a retry stays idempotent."""
         self._send_json(
             "PUT",
-            f"{API_ROOT}/playlists/{playlist_id}/tracks",
+            f"{API_ROOT}/playlists/{playlist_id}/items",
             json_body={"uris": list(uris)},
         )
 
@@ -443,7 +432,15 @@ class SpotifyClient:
 
     def _get_json(self, url: str, *, params: _Query | None) -> dict[str, object]:
         with self._session() as http:
-            return self._request_json(http, "GET", url, params, json_body=None)
+            body = self._request_json(http, "GET", url, params, json_body=None)
+        if body is None:
+            raise SpotifyClientError("Spotify returned an unexpected response.")
+        return body
+
+    def _get_optional_json(self, url: str) -> dict[str, object] | None:
+        """GET one resource. HTTP 404 means the id is gone and the caller skips it."""
+        with self._session() as http:
+            return self._request_json(http, "GET", url, None, json_body=None, missing_ok=True)
 
     def _send_json(
         self,
@@ -453,7 +450,10 @@ class SpotifyClient:
         json_body: dict[str, object],
     ) -> dict[str, object]:
         with self._session() as http:
-            return self._request_json(http, method, url, None, json_body=json_body)
+            body = self._request_json(http, method, url, None, json_body=json_body)
+        if body is None:
+            raise SpotifyClientError("Spotify returned an unexpected response.")
+        return body
 
     @contextmanager
     def _session(self) -> Iterator[httpx.Client]:
@@ -471,7 +471,8 @@ class SpotifyClient:
         params: _Query | None,
         *,
         json_body: dict[str, object] | None,
-    ) -> dict[str, object]:
+        missing_ok: bool = False,
+    ) -> dict[str, object] | None:
         refreshed = False
         rate_limits = 0
         token_override: str | None = None
@@ -499,6 +500,8 @@ class SpotifyClient:
                 rate_limits += 1
                 self._sleep(_retry_after(response))
                 continue
+            if response.status_code == 404 and missing_ok:
+                return None
             if response.status_code not in (200, 201):
                 raise SpotifyClientError(f"Spotify request failed ({response.status_code}).")
             try:
@@ -513,11 +516,6 @@ class SpotifyClient:
 def _require_time_range(time_range: str) -> None:
     if time_range not in _TIME_RANGES:
         raise SpotifyClientError(f"Unknown Spotify time range: {time_range}.")
-
-
-def _chunks(values: Sequence[str], size: int) -> Iterator[Sequence[str]]:
-    for start in range(0, len(values), size):
-        yield values[start : start + size]
 
 
 def _next_page(url: str | None) -> str | None:

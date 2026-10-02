@@ -26,10 +26,10 @@ What remains, and what the pipeline uses:
 | Identity and market | `GET /me` |
 | Plays | `GET /me/player/recently-played` |
 | Seeds | `GET /me/top/artists`, `GET /me/top/tracks`, `GET /me/tracks` |
-| Deep cuts | `GET /artists/{id}/albums`, `GET /albums/{id}/tracks`, batched `GET /tracks` |
-| Genre overlap | batched `GET /artists` (`genres` is still on the artist object) |
+| Deep cuts | `GET /artists/{id}/albums`, `GET /albums/{id}/tracks`, `GET /tracks/{id}` |
+| Genre overlap | `GET /artists/{id}` (`genres` is still on the artist object) |
 | Name to playable id | `GET /search?type=track` |
-| Delivery | `POST /users/{id}/playlists`, `POST /playlists/{id}/tracks` |
+| Delivery | `POST /me/playlists`, `PUT /playlists/{id}/items` |
 
 **History is a 50-track window, not an archive.** `recently-played` returns at most the last 50 tracks that were played for more than 30 seconds. `before` and `after` only slice that window; they do not page into older history. A daily poll is not enough. A few hours of listening can push more than 50 tracks through the window and those plays are gone forever. The history job runs every two to three hours, with gap detection when the window is already full of plays newer than the last cursor.
 
@@ -124,7 +124,7 @@ The run loads the user, refreshes the token, and inserts a `recommendation_runs`
 
 *Similar tracks.* For each seed track, `track.getSimilar`. Store the raw match. Do not compare it with artist matches until both are normalized inside the run.
 
-*Deep cuts.* For artists the user already likes, list albums (`include_groups=album`, skip compilations), then album tracks. Batch-fetch full track objects so popularity is available. Drop the artist’s obvious hits (high popularity, or anything Last.fm ranks in their top tracks) and anything already in history. What remains is catalog the user likes the artist for but has not played. These candidates have no Last.fm match; they carry an inverse-popularity signal and a genre overlap of 1.0 because the artist is already the user’s.
+*Deep cuts.* For artists the user already likes, list albums (`include_groups=album`, skip compilations), then album tracks. Fetch each full track object so popularity is available. Drop the artist’s obvious hits (high popularity, or anything Last.fm ranks in their top tracks) and anything already in history. What remains is catalog the user likes the artist for but has not played. These candidates have no Last.fm match; they carry an inverse-popularity signal and a genre overlap of 1.0 because the artist is already the user’s.
 
 Throttle Last.fm to about 4 requests per second. On error 29 or HTTP 429, exponential backoff. Read the cache before every call.
 
