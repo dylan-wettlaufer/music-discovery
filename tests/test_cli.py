@@ -102,11 +102,54 @@ def test_help_lists_the_commands():
     assert "newest first" in result.stdout
 
 
-def test_unwired_commands_exit():
-    for args in (["generate"], ["generate", "--publish"]):
-        result = runner.invoke(app, args)
-        assert result.exit_code == 1
-        assert "not implemented" in result.output.lower()
+def test_generate_dry_run_does_not_publish(monkeypatch):
+    seen: dict[str, bool] = {}
+
+    def fake(*, publish: bool = True) -> object:
+        seen["publish"] = publish
+        from datetime import date
+
+        from music_discovery.jobs.weekly import WeeklyResult
+
+        return WeeklyResult(
+            status="dry_run",
+            week_start=date(2026, 9, 27),
+            selected=(),
+            playlist_id=None,
+            message="Dry run. Nothing was added to Spotify.",
+        )
+
+    monkeypatch.setattr("music_discovery.cli.run_weekly", fake)
+    result = runner.invoke(app, ["generate"])
+
+    assert result.exit_code == 0
+    assert seen["publish"] is False
+    assert "Nothing was added to Spotify" in result.output
+
+
+def test_generate_publish_writes_the_playlist(monkeypatch):
+    seen: dict[str, bool] = {}
+
+    def fake(*, publish: bool = True) -> object:
+        seen["publish"] = publish
+        from datetime import date
+
+        from music_discovery.jobs.weekly import WeeklyResult
+
+        return WeeklyResult(
+            status="published",
+            week_start=date(2026, 9, 27),
+            selected=(),
+            playlist_id="playlist-1",
+            message="Published Fresh — Sep 27 (2 tracks).",
+        )
+
+    monkeypatch.setattr("music_discovery.cli.run_weekly", fake)
+    result = runner.invoke(app, ["generate", "--publish"])
+
+    assert result.exit_code == 0
+    assert seen["publish"] is True
+    assert "Published" in result.output
 
 
 def test_poll_invokes_the_history_job(monkeypatch):

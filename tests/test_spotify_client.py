@@ -9,6 +9,7 @@ from music_discovery.spotify.client import (
     ME_URL,
     RECENTLY_PLAYED_URL,
     SAVED_TRACKS_URL,
+    SEARCH_URL,
     SpotifyAuthError,
     SpotifyClient,
     SpotifyClientError,
@@ -226,3 +227,155 @@ def test_a_persistent_rate_limit_stops():
             client.get_recently_played()
 
     assert slept == [1.0, 1.0, 1.0]
+
+
+def test_top_artists_and_tracks_send_the_time_range():
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(f"{request.url.path}?{request.url.params['time_range']}")
+        if request.url.path.endswith("/artists"):
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": "artist-radiohead",
+                            "name": "Radiohead",
+                            "genres": ["art rock"],
+                            "popularity": 80,
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    {
+                        "id": "track-karma",
+                        "name": "Karma Police",
+                        "artists": [{"id": "artist-radiohead", "name": "Radiohead"}],
+                    }
+                ]
+            },
+        )
+
+    http, client = _client(handler)
+    with http:
+        artists = client.get_top_artists(time_range="long_term")
+        tracks = client.get_top_tracks(time_range="medium_term")
+
+    assert seen == ["/v1/me/top/artists?long_term", "/v1/me/top/tracks?medium_term"]
+    assert artists[0].genres == ["art rock"]
+    assert tracks[0].id == "track-karma"
+
+
+def test_artist_albums_skip_compilations_and_album_tracks_page():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/albums"):
+            assert request.url.params["include_groups"] == "album"
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": "album-bends",
+                            "name": "The Bends",
+                            "album_type": "album",
+                            "release_date": "1995-03-13",
+                        }
+                    ],
+                    "next": None,
+                },
+            )
+        return httpx.Response(
+            200,
+            json={"items": [{"id": "track-deep", "name": "Planet Telex"}], "next": None},
+        )
+
+    http, client = _client(handler)
+    with http:
+        albums = client.get_artist_albums("artist-radiohead")
+        assert albums[0].album_type == "album"
+        tracks = client.get_album_tracks("album-bends")
+
+    assert tracks[0].id == "track-deep"
+
+
+def test_batched_tracks_and_artists_and_market_search():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/tracks":
+            assert request.url.params["ids"] == "track-a,track-b"
+            return httpx.Response(
+                200,
+                json={
+                    "tracks": [
+                        {"id": "track-a", "name": "A", "popularity": 10},
+                        None,
+                    ]
+                },
+            )
+        if request.url.path == "/v1/artists":
+            return httpx.Response(
+                200,
+                json={"artists": [{"id": "artist-portishead", "name": "Portishead", "genres": ["trip hop"]}]},
+            )
+        assert request.url.copy_with(query=None) == httpx.URL(SEARCH_URL)
+        assert request.url.params["type"] == "track"
+        assert request.url.params["market"] == "US"
+        return httpx.Response(
+            200,
+            json={
+                "tracks": {
+                    "items": [
+                        {
+                            "id": "track-glory",
+                            "name": "Glory Box",
+                            "artists": [{"name": "Portishead"}],
+                            "album": {"album_type": "album", "name": "Dummy"},
+                        }
+                    ]
+                }
+            },
+        )
+
+    http, client = _client(handler)
+    with http:
+        tracks = client.get_tracks(["track-a", "track-b"])
+        artists = client.get_artists(["artist-portishead"])
+        found = client.search_tracks('track:"Glory Box" artist:"Portishead"', market="US")
+
+    assert [track.id for track in tracks] == ["track-a"]
+    assert artists[0].genres == ["trip hop"]
+    assert found[0].album is not None
+    assert found[0].album.album_type == "album"
+
+
+def test_create_playlist_is_private_and_can_be_found_by_name():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            body = json.loads(request.content)
+            assert body["public"] is False
+            assert body["name"] == "Fresh — Sep 27"
+            assert request.url.path == "/v1/users/spotify-user/playlists"
+            return httpx.Response(201, json={"id": "playlist-1", "name": body["name"]})
+        if request.method == "PUT":
+            body = json.loads(request.content)
+            assert body["uris"] == ["spotify:track:track-glory"]
+            return httpx.Response(200, json={"snapshot_id": "snap"})
+        if request.method == "POST":
+            return httpx.Response(500)
+        return httpx.Response(
+            200,
+            json={"items": [{"id": "playlist-1", "name": "Fresh — Sep 27"}], "next": None},
+        )
+
+    http, client = _client(handler)
+    with http:
+        created = client.create_playlist("spotify-user", "Fresh — Sep 27", description="Tracks you have not played.")
+        client.replace_playlist_tracks(created, ["spotify:track:track-glory"])
+        found = client.find_playlist_id("Fresh — Sep 27")
+
+    assert created == "playlist-1"
+    assert found == "playlist-1"

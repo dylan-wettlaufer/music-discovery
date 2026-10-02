@@ -19,9 +19,8 @@ from sqlalchemy.orm import Session
 from music_discovery.config import get_settings
 from music_discovery.db import session_scope
 from music_discovery.jobs.poll_history import PollError, run_poll
-from music_discovery.jobs.weekly import run_weekly
+from music_discovery.jobs.weekly import WeeklyError, WeeklyResult, run_weekly
 from music_discovery.models import JobRun, PlayEvent, RecommendationRun, Track
-from music_discovery.pipeline.publish import publish_playlist
 from music_discovery.spotify.auth import AuthError, ensure_access_token, run_oauth
 from music_discovery.spotify.client import (
     SpotifyAuthError,
@@ -337,6 +336,38 @@ def _cell(value: str | None) -> str:
     return escape(value)
 
 
+def _generate_table(result: WeeklyResult) -> Table:
+    count = len(result.selected)
+    noun = "track" if count == 1 else "tracks"
+    table = Table(
+        title=f"Fresh — week of {result.week_start:%b} {result.week_start.day}",
+        title_style="bold",
+        title_justify="left",
+        caption=f"{count} {noun}",
+        caption_style="dim",
+        caption_justify="left",
+        box=box.ROUNDED,
+        border_style="cyan",
+        header_style="bold cyan",
+        expand=True,
+        padding=(0, 1),
+    )
+    table.add_column("#", justify="right", style="dim", no_wrap=True)
+    table.add_column("Artist", style="bold", ratio=2, overflow="fold")
+    table.add_column("Track", ratio=3, overflow="fold")
+    table.add_column("Source", no_wrap=True)
+    table.add_column("Score", justify="right", no_wrap=True)
+    for index, item in enumerate(result.selected, start=1):
+        table.add_row(
+            str(index),
+            escape(item.candidate.artist),
+            escape(item.candidate.title),
+            item.candidate.source.value.replace("_", " "),
+            f"{item.score:.2f}",
+        )
+    return table
+
+
 def _empty(console: Console, title: str, message: str) -> None:
     console.print(
         Panel(
@@ -399,14 +430,21 @@ def generate(
     dry_run: bool = typer.Option(
         True,
         "--dry-run/--publish",
-        help="Score a playlist without creating it. Publishing is not wired yet.",
+        help="Score a playlist without creating it. --publish writes the private playlist.",
     ),
 ) -> None:
-    """Build this week's playlist."""
-    if dry_run:
-        _call(run_weekly)
-        return
-    _call(publish_playlist)
+    """Build this week's playlist of tracks you have not played."""
+    try:
+        result = run_weekly(publish=not dry_run)
+    except (WeeklyError, AuthError) as exc:
+        _stderr().print(_panel(str(exc), title="Not ready", style="yellow"))
+        raise typer.Exit(code=1) from exc
+    console = _stdout(highlight=False)
+    if result.selected:
+        console.print(_generate_table(result))
+        console.print()
+    style = "red" if result.status == "failed" else "cyan"
+    console.print(_panel(result.message, title="Generate", style=style))
 
 
 @app.command()

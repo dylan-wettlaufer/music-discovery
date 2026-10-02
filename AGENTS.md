@@ -12,7 +12,7 @@ music-discovery auth      # one-time Spotify OAuth
 music-discovery profile    # signed-in Spotify account
 music-discovery poll       # recently-played + saved tracks
 music-discovery played     # tracks stored from recently played
-music-discovery generate   # weekly playlist (dry-run until publish is wired)
+music-discovery generate   # weekly playlist; --publish creates it
 music-discovery runs       # job and recommendation history
 ```
 
