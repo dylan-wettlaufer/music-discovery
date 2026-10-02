@@ -41,5 +41,5 @@ One concern per commit. Do not commit secrets or `.env` files.
 ## Branches
 
 Do not commit to `main`. Do the work on a task branch, one concern per branch.
-
-When more than one agent is working in this repo, each agent uses its own branch and its own git worktree. Do not share a working directory with another active agent.
+Each branch should start with a prefix then a title for the feature/fix, seprated by /
+examples: feature/add-logout-button, bug/fix-test
